@@ -15,7 +15,7 @@
 npm install
 npm run dev       # 本地开发
 npm run build     # 类型检查 + 生产构建到 dist/
-npm test          # 36 个单元测试（引擎 + 导出导入）
+npm test          # 65 个单元/界面测试（引擎 + 版本单位 + 导出导入）
 node e2e/smoke.mjs # 25 项真实浏览器端到端检查（需先 npm run dev）
 ```
 
@@ -38,26 +38,39 @@ node e2e/smoke.mjs # 25 项真实浏览器端到端检查（需先 npm run dev�
 6. **超出支持范围**：函数（sin、cos、sqrt…）、取模、阶乘、关系符、±、矩阵/对象等，标记“未验证”而不是强行计算。
 7. **公式隔离**：每条公式独立分析、独立持久化，一条公式的任何错误都不会影响其他公式。
 8. **三段展示**：原式 → 替换变量后的计算式 → 结果（含结果单位及可选的目标单位换算值）。导出的 JSON 同时保存 LaTeX（可编辑本体）与中缀表达式（便于备份查看）。
+9. **课程单位库（本地自定义工程单位）**：教师可用「已支持单位 + 比例因子 + 复合量纲」声明单位（如 `cfs = 1 ft^3/s`、`kcfs = 1000 cfs`），变量表、公式输入与结果换算均可选用。
+   - 每个单位有**稳定 id**；修订定义只**追加新版本**（旧版本永久保留），不允许原地改写。
+   - 公式中每个单位字段都**钉住具体定义版本**（`UnitRef`）：同名单位修订后，旧公式与旧结果继续按旧定义解析，不会被新定义悄悄重解释；只有**显式迁移**勾选的公式才采用新版本。
+   - 定义链禁止**自引用、间接循环、未知单位、带偏移仿射温标（degC/degF）组合**；保存前在隔离 mathjs 实例完整校验，**失败不留残缺单位**。
+   - 可导出/导入「单位包」。导入时同名但量纲/比例不同的单位由用户选择 **隔离（命名空间，默认）/ 重命名 / 显式迁移**，并展示冲突定义与受影响公式；导出文件携带单位定义与每个公式实际绑定的版本，结果可追溯。
+   - IndexedDB 模式 v1→v2 自动迁移（新增 `courseUnits` 仓）；JSON 导出为 v2（含单位库 + 版本绑定），仍可读取旧 v1 文件。
 
 ## 项目结构
 
 ```
 src/
   engine/
-    latex.ts        # MathLive LaTeX → mathjs 中缀表达式（含范围控制）
-    math.ts         # 解析/量纲检查/定位/求值/换算，输出结构化 Issue
-    units.ts        # 首版常用单位清单（输入提示）
-    types.ts        # Formula / AnalysisResult / Issue 类型
-    math.test.ts    # 引擎测试（摄氏、角度、除零、定位、隔离…）
+    latex.ts          # MathLive LaTeX → mathjs 中缀表达式（含范围控制）
+    math.ts           # 解析/量纲检查/定位/求值/换算，输出结构化 Issue
+    mathInstance.ts   # 全引擎共享的唯一 mathjs 实例（注册课程单位别名）
+    courseUnits.ts    # 课程单位库：校验/版本/循环检测/冲突规划/公式迁移（纯函数）
+    courseResolver.ts # 课程单位 ↔ mathjs 别名桥：按钉住版本解析、裸名来源偏好
+    units.ts          # 首版常用单位清单（输入提示）
+    types.ts          # Formula / AnalysisResult / UnitRef 等类型
+    math.test.ts      # 引擎测试
+    courseUnits.test.ts      # 自定义单位/版本/循环/导入冲突/迁移测试
   storage/
-    db.ts           # IndexedDB 封装
-    exchange.ts     # JSON 导出/导入
+    db.ts             # IndexedDB 封装（v2：formulas + courseUnits）
+    exchange.ts       # JSON 笔记与单位包导出/导入
+    exchange.course.test.ts
   components/
-    MathInput.tsx   # MathLive math-field 封装
-    Tex.tsx         # KaTeX 渲染
-    VariableTable.tsx
-    FormulaCard.tsx # 单条公式：输入/赋值/三段展示/问题定位
+    MathInput.tsx     # MathLive math-field 封装
+    Tex.tsx           # KaTeX 渲染
+    VariableTable.tsx # 变量表（含单位版本徽标）
+    FormulaCard.tsx   # 单条公式：输入/赋值/三段展示/问题定位/裸名来源
     UnitSuggestions.tsx
+    UnitLibraryPanel.tsx # 课程单位库：新建/修订/版本/受影响公式/包冲突决策
   App.tsx  main.tsx  styles.css
-e2e/smoke.mjs       # Playwright 端到端冒烟
+e2e/smoke.mjs            # Playwright 冒烟
+e2e/course-units.mjs     # 课程单位库 4 个验收场景的浏览器 E2E（需可下载 Chromium）
 ```

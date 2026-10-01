@@ -1,7 +1,9 @@
 // 单条公式卡片：输入、变量赋值、原式/替换式/结果三段展示、问题定位
-import { useMemo, useState } from "react";
-import type { Formula, VariableDef } from "../engine/types";
+import { useEffect, useMemo, useState } from "react";
+import type { Formula, ResolvedBindings, VariableDef } from "../engine/types";
 import { analyzeFormula } from "../engine/math";
+import type { CourseLibrary } from "../engine/courseUnits";
+import type { CourseUnitResolver } from "../engine/courseResolver";
 import MathInput from "./MathInput";
 import Tex from "./Tex";
 import VariableTable from "./VariableTable";
@@ -9,6 +11,9 @@ import VariableTable from "./VariableTable";
 interface Props {
   formula: Formula;
   index: number;
+  resolver: CourseUnitResolver;
+  library: CourseLibrary;
+  onBindings: (b: ResolvedBindings) => void;
   onChange: (patch: Partial<Formula>) => void;
   onDelete: () => void;
 }
@@ -20,13 +25,31 @@ const STATUS_META = {
   empty: { label: "空公式", cls: "empty" },
 } as const;
 
-export default function FormulaCard({ formula, index, onChange, onDelete }: Props) {
+export default function FormulaCard({ formula, index, resolver, library, onBindings, onChange, onDelete }: Props) {
   const [collapsed, setCollapsed] = useState(false);
+  // 隔离单位包（去重）：供公式选择裸名来源
+  const scopedPackages = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const u of library.units) {
+      if (u.scope) map.set(u.scope, u.packageName ?? library.scopes[u.scope] ?? u.scope);
+    }
+    return [...map.entries()].map(([scope, name]) => ({ scope, name }));
+  }, [library]);
   const result = useMemo(
-    () => analyzeFormula(formula.latex, formula.variables, formula.targetUnit),
-    [formula.latex, formula.variables, formula.targetUnit],
+    () => analyzeFormula(formula.latex, formula.variables, formula.targetUnit, {
+      resolver,
+      targetRefs: formula.targetUnitRefs,
+      preferredScope: formula.preferredScope,
+    }),
+    [formula.latex, formula.variables, formula.targetUnit, formula.targetUnitRefs, formula.preferredScope, resolver],
   );
   const meta = STATUS_META[result.status];
+
+  // 分析产出的实际版本绑定回存到公式（App 内部做相等判断，避免无意义写库）
+  useEffect(() => {
+    if (result.bindings) onBindings(result.bindings);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result.bindings]);
 
   const setVars = (variables: Record<string, VariableDef>) => onChange({ variables });
 
@@ -61,8 +84,22 @@ export default function FormulaCard({ formula, index, onChange, onDelete }: Prop
               <VariableTable names={result.variables} value={formula.variables} onChange={setVars} />
             </div>
             <div>
+              {scopedPackages.length > 0 && (
+                <label className="field-label">
+                  裸名单位来源（影响「未绑定」新单位的解析；已绑定版本不受影响）
+                  <select
+                    value={formula.preferredScope ?? ""}
+                    onChange={(e) => onChange({ preferredScope: e.target.value || undefined })}
+                  >
+                    <option value="">本地单位优先（默认）</option>
+                    {scopedPackages.map((s) => (
+                      <option key={s.scope} value={s.scope}>📦 {s.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label className="field-label">
-                结果目标单位（可选；用于常用单位换算，如 K、degF、deg、rad、km/h）
+                结果目标单位（可选；支持课程单位，如 cfs → m³/s）
                 <input
                   className="unit-result-input"
                   list="unit-suggestions"
@@ -71,6 +108,19 @@ export default function FormulaCard({ formula, index, onChange, onDelete }: Prop
                   onChange={(e) => onChange({ targetUnit: e.target.value })}
                 />
               </label>
+              {(formula.targetUnitRefs ?? []).length > 0 && (
+                <div className="target-badges">
+                  {formula.targetUnitRefs!.map((r) => (
+                    <span
+                      key={`${r.id}@${r.version}`}
+                      className={`unit-ver-badge ${r.scope ? "scoped" : ""}`}
+                      title={`结果换算绑定 ${r.name} v${r.version}`}
+                    >
+                      目标 {r.name}·v{r.version}{r.scope ? "📦" : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
               <label className="field-label">
                 备注
                 <input

@@ -30,6 +30,7 @@ export default function VariableTable({ names, value, onChange }: Props) {
       {rows.map((name) => {
         const def = value[name] ?? { value: "", unit: "" };
         const ghost = extra.includes(name);
+        const refs = def.unitRefs ?? [];
         return (
           <div className={`var-row ${ghost ? "ghost" : ""}`} key={name}>
             <span className="var-name" title={ghost ? "当前公式未引用该变量" : undefined}>{name}</span>
@@ -40,13 +41,24 @@ export default function VariableTable({ names, value, onChange }: Props) {
               value={def.value}
               onChange={(e) => set(name, { value: e.target.value })}
             />
-            <input
-              className="unit-input"
-              list="unit-suggestions"
-              placeholder="如 m/s^2"
-              value={def.unit}
-              onChange={(e) => set(name, { unit: e.target.value })}
-            />
+            <span className="unit-cell">
+              <input
+                className="unit-input"
+                list="unit-suggestions"
+                placeholder="如 m/s^2、cfs"
+                value={def.unit}
+                onChange={(e) => set(name, { unit: e.target.value })}
+              />
+              {refs.map((r) => (
+                <span
+                  key={`${r.id}@${r.version}`}
+                  className={`unit-ver-badge ${r.scope ? "scoped" : ""}`}
+                  title={`绑定定义：${r.name} v${r.version}${r.scope ? `（导入包 ${r.scope}）` : ""}。修订单位不会改变此公式，需显式迁移。`}
+                >
+                  {r.name}·v{r.version}{r.scope ? "📦" : ""}
+                </span>
+              ))}
+            </span>
             {ghost && (
               <button
                 type="button"

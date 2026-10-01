@@ -310,3 +310,60 @@ math-field:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.15);
 }
+
+/* ---------- 课程单位库 ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 40px 16px; z-index: 50; overflow-y: auto;
+}
+.modal {
+  background: var(--bg, #fff); border-radius: 12px; width: min(880px, 100%);
+  box-shadow: 0 24px 60px rgba(0,0,0,0.25); padding: 20px 22px;
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.modal-head h2 { margin: 0; font-size: 1.15rem; }
+.lib-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 10px 0 14px; }
+.lib-form { border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 18px; background: #f8fafc; }
+.lib-form h3, .lib-list h3 { margin: 0 0 10px; font-size: 0.98rem; }
+.lib-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.lib-form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 0.82rem; color: var(--muted); }
+.lib-form-grid label.wide { grid-column: 1 / -1; }
+.lib-form-grid input { padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px; font-size: 0.9rem; }
+.lib-form-actions { display: flex; gap: 10px; margin-top: 12px; }
+.ok-text { color: #15803d; font-weight: 600; }
+
+.lib-list { display: flex; flex-direction: column; gap: 8px; }
+.lib-unit { border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; }
+.lib-unit.scoped { border-color: #c4b5fd; background: #f5f3ff; }
+.lib-unit-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.lib-unit-name { font-family: ui-monospace, monospace; }
+.lib-unit-def { color: var(--muted); font-size: 0.82rem; font-family: ui-monospace, monospace; }
+.badge-version { background: #e0edff; color: #1d4ed8; border-radius: 20px; padding: 1px 9px; font-size: 0.74rem; }
+.badge-scope { background: #ede9fe; color: #6d28d9; border-radius: 20px; padding: 1px 9px; font-size: 0.74rem; }
+.badge-use { background: #fef9c3; color: #854d0e; border-radius: 20px; padding: 1px 9px; font-size: 0.74rem; }
+.lib-unit-body { margin: 8px 0 4px 26px; display: flex; flex-direction: column; gap: 8px; }
+.version-list, .usage-list { margin: 6px 0 0; padding-left: 18px; font-size: 0.82rem; display: flex; flex-direction: column; gap: 3px; }
+
+.unit-cell { display: flex; flex-direction: column; gap: 3px; }
+.unit-ver-badge {
+  align-self: flex-start; background: #ecfeff; color: #0e7490;
+  border: 1px solid #a5f3fc; border-radius: 12px; padding: 0 8px;
+  font-size: 0.68rem; line-height: 1.5;
+}
+.unit-ver-badge.scoped { background: #f5f3ff; color: #6d28d9; border-color: #ddd6fe; }
+.target-badges { display: flex; gap: 6px; margin: 2px 0 6px; }
+
+/* 导入冲突 */
+.conflict-box { border: 1px solid #fdba74; background: #fff7ed; border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+.conflict-box h3 { margin: 0 0 10px; font-size: 0.98rem; }
+.conflict-row { background: #fff; border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; margin-bottom: 10px; }
+.conflict-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.conflict-defs { font-family: ui-monospace, monospace; font-size: 0.8rem; margin: 6px 0; display: flex; flex-direction: column; gap: 2px; }
+.conflict-options { display: flex; flex-direction: column; gap: 5px; font-size: 0.85rem; }
+.conflict-options label { display: flex; align-items: center; gap: 6px; }
+.rename-input { margin-left: 8px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; }
+.migrate-formulas { margin: 8px 0 0 22px; }
+.migrate-formulas ul { margin: 4px 0; padding-left: 18px; font-size: 0.83rem; display: flex; flex-direction: column; gap: 3px; }
+.conflict-actions { display: flex; gap: 10px; margin-top: 8px; }
+.migrate-revision { margin-top: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

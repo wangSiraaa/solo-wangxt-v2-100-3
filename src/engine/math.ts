@@ -2,14 +2,13 @@
 // 每条公式独立调用本模块，任何异常都收敛为结构化 Issue，不影响其他公式。
 
 import {
-  create, all,
-  type MathNode, type MathJsInstance, type Unit,
+  type MathNode, type Unit,
   OperatorNode, ParenthesisNode,
 } from "mathjs";
+import { math } from "./mathInstance";
 import { latexToSource, LatexConvertError } from "./latex";
-import type { AnalysisResult, Issue, VariableDef } from "./types";
-
-const math: MathJsInstance = create(all);
+import type { AnalysisResult, Issue, UnitRef, VariableDef } from "./types";
+import { CourseUnitResolver, UnitResolveError } from "./courseResolver";
 
 /** mathjs v13 中各种节点的判别联合（基接口 MathNode 不带 isXxx 属性）。
  *  字段设为必填：实际节点经 asAny 窄化，访问前先看 isXxx 判别位。 */
@@ -166,13 +165,17 @@ function findUnsupported(node: AnyNode): { path: number[]; message: string }[] {
   return found;
 }
 
-/** 解析用户输入的变量值（数值文本 + 单位文本），失败时在对应节点上记录错误 */
+/** 解析用户输入的变量值（数值文本 + 单位文本），失败时在对应节点上记录错误。
+ *  resolver 存在时支持课程单位库，并把实际钉住的定义版本写入 boundRefs。 */
 function resolveVariable(
   name: string,
   def: VariableDef | undefined,
   node: AnyNode,
   path: number[],
   col: Collectors,
+  resolver?: CourseUnitResolver,
+  boundRefs?: Map<string, UnitRef[]>,
+  preferredScope?: string,
 ): EvalVal {
   if (!def || def.value.trim() === "") {
     col.add("error", path, node, `变量 ${name} 未赋值：请填写数值（系统不会自动取零）`);
@@ -186,9 +189,17 @@ function resolveVariable(
   const unitText = def.unit.trim();
   if (!unitText) return num;
   try {
-    return math.unit(`${num} (${unitText})`);
-  } catch {
-    col.add("error", path, node, `变量 ${name} 的单位“${unitText}”无法识别（mathjs 中不存在或写法不支持）`);
+    let expr = unitText;
+    if (resolver) {
+      const r = resolver.resolve(unitText, def.unitRefs, preferredScope);
+      expr = r.expression;
+      if (r.refs.length && boundRefs) boundRefs.set(name, r.refs);
+    }
+    return math.unit(`${num} (${expr})`);
+  } catch (e) {
+    const msg = e instanceof UnitResolveError ? e.message
+      : `变量 ${name} 的单位“${unitText}”无法识别（mathjs 中不存在或写法不支持）`;
+    col.add("error", path, node, msg);
     return SKIPPED;
   }
 }
@@ -325,9 +336,15 @@ export function formatNumber(n: number): string {
   return math.format(n, { notation: "fixed", precision: 10 }).replace(/\.?0+$/, "");
 }
 
-/** 结果拆成数值 + 单位文本 */
-function splitQuantity(q: Quantity): { value: number; unit: string } {
+/** 结果拆成数值 + 单位文本。
+ *  mathjs 的 toString 保留输入时的数字前缀（如 "10 cfs"），value 却是 SI 值。
+ *  有课程单位解析器时先尝试换算到自洽的命名单位；否则用默认前缀解析。 */
+function splitQuantity(q: Quantity, resolver?: CourseUnitResolver): { value: number; unit: string } {
   if (typeof q === "number") return { value: q, unit: "" };
+  if (resolver) {
+    const coh = resolver.toCoherent(q);
+    if (Number.isFinite(coh.value)) return coh;
+  }
   const text = q.toString();
   const m = /^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(.*)$/.exec(text);
   if (!m) return { value: q.value, unit: q.formatUnits() };
@@ -414,6 +431,7 @@ export function analyzeFormula(
   latex: string,
   varDefs: Record<string, VariableDef>,
   targetUnitText: string,
+  options?: { resolver?: CourseUnitResolver; targetRefs?: UnitRef[]; preferredScope?: string },
 ): AnalysisResult {
   if (!latex.trim()) {
     return { status: "empty", variables: [], issues: [] };
@@ -472,13 +490,15 @@ export function analyzeFormula(
   const variables = collectVariables(tree);
 
   // 4) 变量解析（同一变量多处引用：只在首次出现处报未定义）
+  const resolver = options?.resolver;
   const scope = new Map<string, Quantity>();
   const failedNames = new Set<string>();
+  const boundRefs = new Map<string, UnitRef[]>();
   walk(tree, [], (n, p) => {
     if (n.isSymbolNode && !BUILTIN_CONSTANTS.has(n.name) && !scope.has(n.name) && !failedNames.has(n.name)) {
       // 兼容 T1 与 T_1 两种变量命名
       const def = varDefs[n.name] ?? varDefs[n.name.replace(/_(\d+)$/, "$1")];
-      const v = resolveVariable(n.name, def, n, p, col);
+      const v = resolveVariable(n.name, def, n, p, col, resolver, boundRefs, options?.preferredScope);
       if (v === SKIPPED) failedNames.add(n.name);
       else scope.set(n.name, v);
     }
@@ -489,33 +509,45 @@ export function analyzeFormula(
 
   // 6) 替换树（展示计算式 + 高亮），结构与原树一一对应
   const subTree = substitute(tree, scope, []);
-  const substituted = subTree.toString({ parenthesize: "all", implicit: "show" });
+  const substitutedRaw = subTree.toString({ parenthesize: "all", implicit: "show" });
+  const substituted = resolver ? resolver.prettify(substitutedRaw) : substitutedRaw;
 
   // 7) 结果与目标单位换算
   let value: number | undefined;
   let resultUnit: string | undefined;
   let targetValue: number | undefined;
   let targetUnit: string | undefined;
+  let boundTargetRefs: UnitRef[] = [];
 
   if (raw !== SKIPPED) {
-    const s = splitQuantity(raw);
+    const s = splitQuantity(raw, resolver);
     value = s.value;
-    resultUnit = s.unit;
+    resultUnit = resolver ? resolver.prettify(s.unit) : s.unit;
     const t = targetUnitText.trim();
     if (t) {
       try {
-        // 先解析目标单位（无法识别时抛错，落入下方未验证提示）
-        math.unit(t);
+        // 解析目标单位（课程单位走版本绑定；无法识别时抛错，落入下方未验证提示）
+        let targetExpr = t;
+        let targetBound: UnitRef[] = [];
+        if (resolver) {
+          const rr = resolver.resolve(t, options?.targetRefs, options?.preferredScope);
+          targetExpr = rr.expression;
+          targetBound = rr.refs;
+        } else {
+          math.unit(t);
+        }
         let converted: Unit;
         if (typeof raw === "number") {
           // 纯数结果只允许换算到角度量纲（弧度 ↔ 度）
-          converted = math.unit(raw, "rad").to(t);
+          converted = math.unit(raw, "rad").to(targetExpr);
         } else {
-          converted = raw.to(t);
+          converted = raw.to(targetExpr);
         }
-        const cs = splitQuantity(converted);
+        const cs = splitQuantity(converted, resolver);
         targetValue = cs.value;
-        targetUnit = cs.unit;
+        // 目标单位优先显示用户填写的名称（如 cfs），mathjs 规范名仅用于内置单位
+        targetUnit = resolver ? (t || resolver.prettify(cs.unit)) : cs.unit;
+        boundTargetRefs = targetBound;
       } catch {
         col.add("warning", [], tree,
           `结果（${typeof raw === "number" ? "无量纲纯数" : resultUnit}）无法换算到目标单位“${t}”：量纲不兼容或该单位无法识别，换算结果未验证`);
@@ -540,18 +572,32 @@ export function analyzeFormula(
     summary = `结果未验证（${warnings.length} 处超出支持范围或需人工确认）`;
   }
 
+  const originalTexRaw = highlightTex(tree, col.issues);
+  const substitutedTexRaw = highlightTex(subTree, col.issues);
+  const originalTex = resolver ? resolver.prettifyTex(originalTexRaw) : originalTexRaw;
+  const substitutedTex = resolver ? resolver.prettifyTex(substitutedTexRaw) : substitutedTexRaw;
+
+  // 本次分析实际钉住的课程单位版本（由界面持久化回公式）
+  let bindings: AnalysisResult["bindings"];
+  if (resolver) {
+    const variables: Record<string, UnitRef[]> = {};
+    for (const [vn, refs] of boundRefs) variables[vn] = refs;
+    bindings = { variables, target: boundTargetRefs };
+  }
+
   return {
     status,
     variables,
     issues: col.issues,
     source,
     substituted,
-    originalTex: highlightTex(tree, col.issues),
-    substitutedTex: highlightTex(subTree, col.issues),
+    originalTex,
+    substitutedTex,
     value,
     resultUnit,
     targetValue,
     targetUnit,
+    bindings,
     summary,
   };
 }
