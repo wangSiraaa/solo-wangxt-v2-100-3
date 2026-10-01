@@ -4,12 +4,15 @@
 import {
   create, all,
   type MathNode, type MathJsInstance, type Unit,
-  OperatorNode, ParenthesisNode,
+  OperatorNode, ParenthesisNode, SymbolNode, ConstantNode,
 } from "mathjs";
 import { latexToSource, LatexConvertError } from "./latex";
 import type { AnalysisResult, Issue, VariableDef } from "./types";
+import { buildUnitContext, type UnitContext, type UnitRef } from "./courseUnits";
 
 const math: MathJsInstance = create(all);
+/** 无课程单位库时的默认上下文（仅内置单位） */
+const DEFAULT_CTX: UnitContext = buildUnitContext({ schemaVersion: 1, units: [] });
 
 /** mathjs v13 中各种节点的判别联合（基接口 MathNode 不带 isXxx 属性）。
  *  字段设为必填：实际节点经 asAny 窄化，访问前先看 isXxx 判别位。 */
@@ -85,8 +88,8 @@ function dimensionsCompatible(a: Quantity, b: Quantity): boolean {
   return a.equalBase(b);
 }
 
-const dimText = (v: Quantity): string =>
-  typeof v === "number" ? "无量纲（纯数）" : `量纲 [${v.formatUnits()}]`;
+const dimText = (v: Quantity, ctx: UnitContext): string =>
+  typeof v === "number" ? "无量纲（纯数）" : `量纲 [${ctx.display(v.formatUnits())}]`;
 
 /** 按数字下标路径递归遍历（ParenthesisNode 视为透明包装） */
 function walk(
@@ -166,13 +169,14 @@ function findUnsupported(node: AnyNode): { path: number[]; message: string }[] {
   return found;
 }
 
-/** 解析用户输入的变量值（数值文本 + 单位文本），失败时在对应节点上记录错误 */
+/** 解析用户输入的变量值（数值文本 + 单位文本 + 可选版本绑定），失败时记录错误 */
 function resolveVariable(
   name: string,
   def: VariableDef | undefined,
   node: AnyNode,
   path: number[],
   col: Collectors,
+  ctx: UnitContext,
 ): EvalVal {
   if (!def || def.value.trim() === "") {
     col.add("error", path, node, `变量 ${name} 未赋值：请填写数值（系统不会自动取零）`);
@@ -184,11 +188,14 @@ function resolveVariable(
     return SKIPPED;
   }
   const unitText = def.unit.trim();
-  if (!unitText) return num;
+  if (!unitText && !def.unitRef) return num;
   try {
-    return math.unit(`${num} (${unitText})`);
+    return ctx.parseQuantity(num, unitText, def.unitRef);
   } catch {
-    col.add("error", path, node, `变量 ${name} 的单位“${unitText}”无法识别（mathjs 中不存在或写法不支持）`);
+    const which = def.unitRef
+      ? `课程单位“${def.unitRef.name ?? unitText}”（版本 ${def.unitRef.version}）`
+      : `单位“${unitText}”`;
+    col.add("error", path, node, `变量 ${name} 的${which}无法识别（可能已被删除或写法不支持）`);
     return SKIPPED;
   }
 }
@@ -200,9 +207,10 @@ function evalNode(
   scope: Map<string, Quantity>,
   failedNames: Set<string>,
   col: Collectors,
+  ctx: UnitContext,
 ): EvalVal {
   if (node.isParenthesisNode) {
-    return evalNode(node.content, path, scope, failedNames, col);
+    return evalNode(node.content, path, scope, failedNames, col, ctx);
   }
 
   if (node.isConstantNode) {
@@ -231,7 +239,7 @@ function evalNode(
     const childPath = (i: number) => [...path, i];
 
     if (node.args.length === 1) {
-      const operand = evalNode(node.args[0], childPath(0), scope, failedNames, col);
+      const operand = evalNode(node.args[0], childPath(0), scope, failedNames, col, ctx);
       if (operand === SKIPPED) return SKIPPED;
       if (node.op === "-") {
         if (hasOffset(operand)) {
@@ -244,14 +252,14 @@ function evalNode(
       return operand; // 一元 +
     }
 
-    const l = evalNode(node.args[0], childPath(0), scope, failedNames, col);
-    const r = evalNode(node.args[1], childPath(1), scope, failedNames, col);
+    const l = evalNode(node.args[0], childPath(0), scope, failedNames, col, ctx);
+    const r = evalNode(node.args[1], childPath(1), scope, failedNames, col, ctx);
 
     if (node.op === "+" || node.op === "-") {
       if (l === SKIPPED || r === SKIPPED) return SKIPPED;
       if (!dimensionsCompatible(l, r)) {
         col.add("error", path, node,
-          `量纲不兼容，不能${node.op === "+" ? "相加" : "相减"}：左侧为${dimText(l)}，右侧为${dimText(r)}。可先做单位换算使其一致。`);
+          `量纲不兼容，不能${node.op === "+" ? "相加" : "相减"}：左侧为${dimText(l, ctx)}，右侧为${dimText(r, ctx)}。可先做单位换算使其一致。`);
         return SKIPPED;
       }
       if (hasOffset(l) || hasOffset(r)) {
@@ -314,8 +322,7 @@ function safeArith(fn: () => Quantity, path: number[], node: AnyNode, col: Colle
     return SKIPPED;
   }
   if (typeof result === "number" && !Number.isFinite(result)) {
-    col.add("error", path, node, "运算结果不是有限数值（可能由除零引起）");
-    return SKIPPED;
+    col.add("error", path, node, "运算结果不是有限数值（可能由除零引起）");    return SKIPPED;
   }
   return result;
 }
@@ -325,42 +332,96 @@ export function formatNumber(n: number): string {
   return math.format(n, { notation: "fixed", precision: 10 }).replace(/\.?0+$/, "");
 }
 
-/** 结果拆成数值 + 单位文本 */
-function splitQuantity(q: Quantity): { value: number; unit: string } {
+/** 结果拆成数值 + 单位文本（课程单位内部名还原为显示名） */
+function splitQuantity(q: Quantity, ctx: UnitContext): { value: number; unit: string } {
   if (typeof q === "number") return { value: q, unit: "" };
-  const text = q.toString();
+  const text = ctx.display(q.toString());
   const m = /^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(.*)$/.exec(text);
-  if (!m) return { value: q.value, unit: q.formatUnits() };
+  if (!m) return { value: q.value, unit: ctx.display(q.formatUnits()) };
   return { value: Number(m[1]), unit: m[2].replace(/\s+/g, " ").trim() };
 }
 
 // ---------- 变量替换后的 AST（结构与原树一一对应，路径同步） ----------
 
-function literalNode(v: Quantity, path: number[]): AnyNode {
-  const literal = typeof v === "number"
-    ? `(${formatNumber(v)})`
-    : `(${v.toString()})`;
-  const n = asAny(math.parse(literal));
-  (n as PathNode)[ORIG_PATH] = path;
-  return n;
+/** 单个单位因子（可能带幂）的展示节点；课程单位内部名在这里还原为显示名 */
+function unitFactorNode(name: string, power: number, path: number[]): AnyNode {
+  const sym = asAny(new SymbolNode(name) as unknown as MathNode);
+  (sym as PathNode)[ORIG_PATH] = path;
+  if (power === 1) return sym;
+  const node = asAny(new OperatorNode("^", "pow", [sym, new ConstantNode(power)]) as unknown as MathNode);
+  (node as PathNode)[ORIG_PATH] = path;
+  return node;
 }
 
-function substitute(node: AnyNode, scope: Map<string, Quantity>, path: number[]): AnyNode {
+/** 由 mathjs Unit 的因子数组构造展示 AST：正幂在分子、负幂在分母，保持 “m / s” 习惯写法 */
+function unitFactorsNode(q: Unit, path: number[], ctx: UnitContext): AnyNode {
+  const numFactors = q.units.filter((f) => f.power > 0);
+  const denFactors = q.units.filter((f) => f.power < 0);
+
+  const build = (factors: Unit["units"]): AnyNode | null => {
+    let node: AnyNode | null = null;
+    for (const f of factors) {
+      const unitDef = f.unit as unknown as { name: string; text?: string };
+      const displayName = ctx.display(unitDef.text ?? unitDef.name);
+      const factor = unitFactorNode(displayName, Math.abs(f.power), path);
+      node = node === null
+        ? factor
+        : asAny(new OperatorNode("*", "multiply", [node, factor]) as unknown as MathNode);
+      (node as PathNode)[ORIG_PATH] = path;
+    }
+    return node;
+  };
+
+  const num = build(numFactors);
+  const den = build(denFactors);
+  if (num && den) {
+    const node = asAny(new OperatorNode("/", "divide", [num, den]) as unknown as MathNode);
+    (node as PathNode)[ORIG_PATH] = path;
+    return node;
+  }
+  const only = num ?? den;
+  if (only) return only;
+  // 无量纲单位（如 %）：因子为空时退回字符串解析
+  const fallback = asAny(math.parse(ctx.display(q.formatUnits()) || "1"));
+  (fallback as PathNode)[ORIG_PATH] = path;
+  return fallback;
+}
+
+function literalNode(v: Quantity, path: number[], ctx: UnitContext): AnyNode {
+  if (typeof v === "number") {
+    const n = asAny(math.parse(`(${formatNumber(v)})`));
+    (n as PathNode)[ORIG_PATH] = path;
+    return n;
+  }
+  const num = asAny(new ConstantNode(v.value) as unknown as MathNode);
+  (num as PathNode)[ORIG_PATH] = path;
+  if (v.units.length === 0) return num;
+  const node = asAny(new OperatorNode("*", "multiply", [num, unitFactorsNode(v, path, ctx)]) as unknown as MathNode);
+  (node as PathNode)[ORIG_PATH] = path;
+  return node;
+}
+
+function substitute(
+  node: AnyNode,
+  scope: Map<string, Quantity>,
+  path: number[],
+  ctx: UnitContext,
+): AnyNode {
   let out: AnyNode;
 
   if (node.isParenthesisNode) {
-    out = asAny(new ParenthesisNode(substitute(node.content, scope, path)) as unknown as MathNode);
+    out = asAny(new ParenthesisNode(substitute(node.content, scope, path, ctx)) as unknown as MathNode);
   } else if (node.isSymbolNode) {
     const v = scope.get(node.name) ?? (node.name === "pi" ? Math.PI : node.name === "e" ? Math.E : undefined);
-    out = v !== undefined ? literalNode(v, path) : node;
+    out = v !== undefined ? literalNode(v, path, ctx) : node;
   } else if (node.isConstantNode) {
     out = node;
   } else if (node.isOperatorNode) {
-    const kids = node.args.map((c, i) => substitute(c, scope, [...path, i]));
+    const kids = node.args.map((c, i) => substitute(c, scope, [...path, i], ctx));
     out = asAny(new OperatorNode(node.op as never, node.fn as never, kids, node.implicit) as unknown as MathNode);
   } else if (node.isFunctionNode) {
     // 超出范围：参数仍替换以便看到代入值，但函数本身不计算
-    const kids = node.args.map((c, i) => substitute(c, scope, [...path, i]));
+    const kids = node.args.map((c, i) => substitute(c, scope, [...path, i], ctx));
     out = asAny(new (node.constructor as { new(fn: unknown, args: AnyNode[]): AnyNode })(node.fn, kids) as unknown as MathNode);
   } else {
     out = node;
@@ -410,11 +471,21 @@ function highlightTex(root: AnyNode, issues: Issue[]): string {
 
 // ---------- 入口 ----------
 
+export interface AnalyzeOptions {
+  /** 课程单位库解析上下文；缺省使用空库（仅内置单位） */
+  units?: UnitContext;
+  /** 结果目标单位的版本绑定 */
+  targetRef?: UnitRef;
+}
+
 export function analyzeFormula(
   latex: string,
   varDefs: Record<string, VariableDef>,
   targetUnitText: string,
+  options?: AnalyzeOptions,
 ): AnalysisResult {
+  const ctx = options?.units ?? DEFAULT_CTX;
+  const targetRef = options?.targetRef;
   if (!latex.trim()) {
     return { status: "empty", variables: [], issues: [] };
   }
@@ -478,17 +549,17 @@ export function analyzeFormula(
     if (n.isSymbolNode && !BUILTIN_CONSTANTS.has(n.name) && !scope.has(n.name) && !failedNames.has(n.name)) {
       // 兼容 T1 与 T_1 两种变量命名
       const def = varDefs[n.name] ?? varDefs[n.name.replace(/_(\d+)$/, "$1")];
-      const v = resolveVariable(n.name, def, n, p, col);
+      const v = resolveVariable(n.name, def, n, p, col, ctx);
       if (v === SKIPPED) failedNames.add(n.name);
       else scope.set(n.name, v);
     }
   });
 
   // 5) 求值 + 量纲检查
-  const raw = evalNode(tree, [], scope, failedNames, col);
+  const raw = evalNode(tree, [], scope, failedNames, col, ctx);
 
   // 6) 替换树（展示计算式 + 高亮），结构与原树一一对应
-  const subTree = substitute(tree, scope, []);
+  const subTree = substitute(tree, scope, [], ctx);
   const substituted = subTree.toString({ parenthesize: "all", implicit: "show" });
 
   // 7) 结果与目标单位换算
@@ -498,27 +569,42 @@ export function analyzeFormula(
   let targetUnit: string | undefined;
 
   if (raw !== SKIPPED) {
-    const s = splitQuantity(raw);
+    // mathjs 在格式化时默认把单位组合 simplify 成 SI 基本单位（cfs·s → m³）。
+    // 结果若含课程单位因子，则关闭自动化简，保留“20 cfs s”的直观组合（SI 值不变，换算照常）；
+    // 纯内置单位仍走默认化简（m/s·s → m）。
+    if (typeof raw !== "number" && raw.units.some((f) => {
+      const ud = f.unit as unknown as { name: string };
+      return ctx.isInternalUnit(ud.name);
+    })) {
+      (raw as Unit & { skipAutomaticSimplification?: boolean }).skipAutomaticSimplification = true;
+    }
+    // 无量纲课程单位（如 percent = 0.01）：dimensions 全零时折算为纯数参与结果展示
+    const isDimensionless = typeof raw === "number"
+      || raw.dimensions.every((d) => d === 0);
+    const effectiveRaw: Quantity = typeof raw === "number" ? raw
+      : isDimensionless ? raw.value
+      : raw;
+    const s = splitQuantity(effectiveRaw, ctx);
     value = s.value;
     resultUnit = s.unit;
     const t = targetUnitText.trim();
-    if (t) {
+    if (t || targetRef) {
       try {
-        // 先解析目标单位（无法识别时抛错，落入下方未验证提示）
-        math.unit(t);
+        // 先经课程单位上下文解析目标单位（无法识别时抛错，落入下方未验证提示）
+        const targetUnitObj = ctx.parseUnit(t, targetRef);
         let converted: Unit;
-        if (typeof raw === "number") {
+        if (typeof effectiveRaw === "number") {
           // 纯数结果只允许换算到角度量纲（弧度 ↔ 度）
-          converted = math.unit(raw, "rad").to(t);
+          converted = math.unit(effectiveRaw, "rad").to(targetUnitObj as unknown as string) as Unit;
         } else {
-          converted = raw.to(t);
+          converted = effectiveRaw.to(targetUnitObj as unknown as string) as Unit;
         }
-        const cs = splitQuantity(converted);
+        const cs = splitQuantity(converted, ctx);
         targetValue = cs.value;
         targetUnit = cs.unit;
       } catch {
         col.add("warning", [], tree,
-          `结果（${typeof raw === "number" ? "无量纲纯数" : resultUnit}）无法换算到目标单位“${t}”：量纲不兼容或该单位无法识别，换算结果未验证`);
+          `结果（${typeof effectiveRaw === "number" ? "无量纲纯数" : resultUnit}）无法换算到目标单位“${targetRef?.name ?? t}”：量纲不兼容或该单位无法识别，换算结果未验证`);
       }
     }
   }

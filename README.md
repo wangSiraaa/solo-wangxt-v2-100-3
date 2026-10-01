@@ -8,6 +8,9 @@
 - **KaTeX** 渲染原式与代入后的计算式（问题节点红/橙色高亮）
 - **mathjs** 负责表达式解析、单位量纲与常用单位换算
 - **IndexedDB** 自动保存，支持 JSON 导出/导入（导出保留可再次编辑的 LaTeX 表达式）
+- **课程单位库**：用已支持单位、正比例因子与复合量纲声明可复用工程单位（如 `cfs`）；
+  每个定义带稳定标识与**不可变版本**，修订只生成新版本，旧公式/旧结果始终解析原定义，
+  显式迁移后才采用新版本；单位包导入遇到同名冲突可选择**隔离 / 重命名 / 显式迁移**。
 
 ## 启动
 
@@ -15,8 +18,9 @@
 npm install
 npm run dev       # 本地开发
 npm run build     # 类型检查 + 生产构建到 dist/
-npm test          # 36 个单元测试（引擎 + 导出导入）
-node e2e/smoke.mjs # 25 项真实浏览器端到端检查（需先 npm run dev）
+npm test          # 67 个单元测试（引擎 + 课程单位库 + IndexedDB 迁移 + 导出导入）
+node e2e/smoke.mjs        # 25 项真实浏览器端到端检查（需先 npm run dev）
+node e2e/course-units.mjs # 23 项课程单位库端到端验收（需先 npm run dev）
 ```
 
 ## 首版明确支持的范围
@@ -39,25 +43,43 @@ node e2e/smoke.mjs # 25 项真实浏览器端到端检查（需先 npm run dev�
 7. **公式隔离**：每条公式独立分析、独立持久化，一条公式的任何错误都不会影响其他公式。
 8. **三段展示**：原式 → 替换变量后的计算式 → 结果（含结果单位及可选的目标单位换算值）。导出的 JSON 同时保存 LaTeX（可编辑本体）与中缀表达式（便于备份查看）。
 
+## 课程单位库（版本化，历史定义不可篡改）
+
+- **声明**：名称（简单标识符，不得覆盖内置单位）+ 正比例因子 + 复合量纲（由内置单位或既有课程单位用 `* / ^` 组合，空串表示无量纲比例）。如 `cfs = 0.028316846592 × m^3/s`。
+- **稳定标识与版本**：每个单位有跨版本不变的 `uid`；公式（变量单位、结果目标单位）通过 `{uid, version}` **绑定**它实际计算时所用的定义。修订同名单位只生成新版本，旧版本永不删除/覆盖。
+- **历史不被重解释**：旧公式即使仍显示旧单位名，也按绑定的旧版本解析；单位文本被改名/清空时绑定仍优先；绑定版本缺失时**报错**，绝不静默改用同名新版本。
+- **显式迁移**：只有用户在公式卡片或单位库中点“迁移”，公式才改用新版本，绑定上保留 `migratedFrom` 留痕。
+- **定义链校验（失败即整体拒绝，不留残缺单位）**：禁止自引用、间接循环（A→B→A）、引用未知单位、零/负比例因子、在定义链中使用 degC/degF 等**带偏移仿射温标**（温度量纲请用 K）。
+- **单位包导入冲突**：同名但不同量纲/定义时逐冲突列出对比与“受影响公式”，用户为每个冲突选择：
+  - **隔离**：两个定义并存，包内公式继续解析包内定义（uid 相同则自动换 uid 并重写引用）；
+  - **重命名**：包内单位换名导入；
+  - **显式迁移**：包内公式绑定改写到本地指定版本，迁移记录可追溯。
+- **持久化**：IndexedDB 结构 v1→v2 自动迁移（新增 `unitLibrary` 单文档仓）；库与受影响公式在同一事务原子提交。导出 JSON（v2）携带完整版本库与每个公式的版本绑定。
+
 ## 项目结构
 
 ```
 src/
   engine/
-    latex.ts        # MathLive LaTeX → mathjs 中缀表达式（含范围控制）
-    math.ts         # 解析/量纲检查/定位/求值/换算，输出结构化 Issue
-    units.ts        # 首版常用单位清单（输入提示）
-    types.ts        # Formula / AnalysisResult / Issue 类型
-    math.test.ts    # 引擎测试（摄氏、角度、除零、定位、隔离…）
+    latex.ts          # MathLive LaTeX → mathjs 中缀表达式（含范围控制）
+    math.ts           # 解析/量纲检查/定位/求值/换算，输出结构化 Issue（走版本化单位上下文）
+    units.ts          # 首版常用单位清单（输入提示）
+    courseUnits.ts    # 课程单位库：校验、版本链、循环检测、版本化解析上下文、迁移
+    types.ts          # Formula / AnalysisResult / Issue 类型
+    math.test.ts      # 引擎测试
+    courseUnits.test.ts
   storage/
-    db.ts           # IndexedDB 封装
-    exchange.ts     # JSON 导出/导入
+    db.ts             # IndexedDB 封装（v2：公式 + 单位库，原子事务、模式迁移）
+    exchange.ts       # JSON 导出/导入、单位包冲突预览与隔离/重命名/迁移
   components/
-    MathInput.tsx   # MathLive math-field 封装
-    Tex.tsx         # KaTeX 渲染
+    MathInput.tsx     # MathLive math-field 封装
+    Tex.tsx           # KaTeX 渲染
     VariableTable.tsx
-    FormulaCard.tsx # 单条公式：输入/赋值/三段展示/问题定位
+    FormulaCard.tsx   # 单条公式：输入/赋值/三段展示/问题定位/旧版本提示
     UnitSuggestions.tsx
+    UnitLibraryPanel.tsx      # 单位定义、版本链、受影响公式、迁移入口
+    ImportConflictDialog.tsx  # 单位包同名冲突的隔离/重命名/迁移选择
   App.tsx  main.tsx  styles.css
-e2e/smoke.mjs       # Playwright 端到端冒烟
+e2e/smoke.mjs            # 25 项原有冒烟
+e2e/course-units.mjs     # 23 项课程单位库端到端验收
 ```

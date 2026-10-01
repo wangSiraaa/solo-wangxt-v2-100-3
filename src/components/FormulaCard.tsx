@@ -2,6 +2,7 @@
 import { useMemo, useState } from "react";
 import type { Formula, VariableDef } from "../engine/types";
 import { analyzeFormula } from "../engine/math";
+import { buildUnitContext, findVersion, latestVersion, type UnitLibrary, type UnitRef } from "../engine/courseUnits";
 import MathInput from "./MathInput";
 import Tex from "./Tex";
 import VariableTable from "./VariableTable";
@@ -9,8 +10,10 @@ import VariableTable from "./VariableTable";
 interface Props {
   formula: Formula;
   index: number;
+  library: UnitLibrary;
   onChange: (patch: Partial<Formula>) => void;
   onDelete: () => void;
+  onMigrateAll: (formulaId: string) => void;
 }
 
 const STATUS_META = {
@@ -20,15 +23,64 @@ const STATUS_META = {
   empty: { label: "空公式", cls: "empty" },
 } as const;
 
-export default function FormulaCard({ formula, index, onChange, onDelete }: Props) {
+export default function FormulaCard({ formula, index, library, onChange, onDelete, onMigrateAll }: Props) {
   const [collapsed, setCollapsed] = useState(false);
+  // 库快照编译为版本化解析上下文（新旧版本同名共存，旧公式解析旧定义）
+  const ctx = useMemo(() => buildUnitContext(library), [library]);
   const result = useMemo(
-    () => analyzeFormula(formula.latex, formula.variables, formula.targetUnit),
-    [formula.latex, formula.variables, formula.targetUnit],
+    () => analyzeFormula(formula.latex, formula.variables, formula.targetUnit, {
+      units: ctx, targetRef: formula.targetUnitRef,
+    }),
+    [formula.latex, formula.variables, formula.targetUnit, formula.targetUnitRef, ctx],
   );
   const meta = STATUS_META[result.status];
 
   const setVars = (variables: Record<string, VariableDef>) => onChange({ variables });
+
+  // 该公式中所有“绑定到旧版本”的单位（变量 + 目标单位）
+  const outdatedRefs = useMemo(() => {
+    const out: { label: string; name: string; from: number; to: number }[] = [];
+    for (const [name, v] of Object.entries(formula.variables)) {
+      const r = v.unitRef;
+      if (r) {
+        const u = library.units.find((x) => x.uid === r.uid);
+        if (u && r.version < latestVersion(u).version) {
+          out.push({ label: `变量 ${name}`, name: latestVersion(u).name, from: r.version, to: latestVersion(u).version });
+        }
+      }
+    }
+    const t = formula.targetUnitRef;
+    if (t) {
+      const u = library.units.find((x) => x.uid === t.uid);
+      if (u && t.version < latestVersion(u).version) {
+        out.push({ label: "结果目标单位", name: latestVersion(u).name, from: t.version, to: latestVersion(u).version });
+      }
+    }
+    return out;
+  }, [formula.variables, formula.targetUnitRef, library]);
+
+  const bindVar = (varName: string, ref: UnitRef | undefined) => {
+    const prev = formula.variables[varName] ?? { value: "", unit: "" };
+    if (!ref) {
+      onChange({ variables: { ...formula.variables, [varName]: { ...prev, unitRef: undefined } } });
+      return;
+    }
+    onChange({
+      variables: {
+        ...formula.variables,
+        [varName]: { ...prev, unit: ref.name ?? prev.unit, unitRef: ref },
+      },
+    });
+  };
+
+  const targetStatus = (() => {
+    const r = formula.targetUnitRef;
+    if (!r) return null;
+    const v = findVersion(library, r.uid, r.version);
+    if (!v) return { text: `v${r.version} 定义缺失`, outdated: true };
+    const lv = latestVersion(library.units.find((u) => u.uid === r.uid)!);
+    return { text: `绑定 v${r.version}${r.version < lv.version ? `（最新 v${lv.version}）` : ""}`, outdated: r.version < lv.version };
+  })();
 
   return (
     <section className={`card status-${meta.cls}`}>
@@ -46,30 +98,84 @@ export default function FormulaCard({ formula, index, onChange, onDelete }: Prop
 
       {!collapsed && (
         <div className="card-body">
+          {outdatedRefs.length > 0 && (
+            <div className="outdated-banner">
+              本公式有 {outdatedRefs.length} 处仍绑定单位旧版本
+              （{outdatedRefs.map((r) => `${r.label} ${r.name} v${r.from}→v${r.to}`).join("；")}）：
+              旧计算保持原值，
+              <button type="button" className="mini-btn" onClick={() => onMigrateAll(formula.id)}>
+                显式迁移到最新版本
+              </button>
+            </div>
+          )}
+
           <label className="field-label">
             输入表达式（支持 + − × ÷、幂、分数、括号；变量用字母或下标，如 <code>v</code>、<code>x_1</code>、<code>θ</code>）
             <MathInput
               value={formula.latex}
               onChange={(latex) => onChange({ latex })}
-              placeholder="例如  v \\cdot t + \\frac{1}{2} a t^2"
+              placeholder="例如  v \cdot t + \frac{1}{2} a t^2"
             />
           </label>
 
           <div className="grid-2">
             <div>
               <div className="field-label">变量赋值</div>
-              <VariableTable names={result.variables} value={formula.variables} onChange={setVars} />
+              <VariableTable
+                names={result.variables}
+                value={formula.variables}
+                onChange={setVars}
+                library={library}
+                onBindUnit={bindVar}
+              />
             </div>
             <div>
               <label className="field-label">
-                结果目标单位（可选；用于常用单位换算，如 K、degF、deg、rad、km/h）
-                <input
-                  className="unit-result-input"
-                  list="unit-suggestions"
-                  value={formula.targetUnit}
-                  placeholder="自动（保留计算单位）"
-                  onChange={(e) => onChange({ targetUnit: e.target.value })}
-                />
+                结果目标单位（可选；可用内置单位或课程单位，如 K、degF、cfs）
+                <span className="target-unit-row">
+                  <input
+                    className="unit-result-input"
+                    list="unit-suggestions"
+                    value={formula.targetUnit}
+                    placeholder="自动（保留计算单位）"
+                    onChange={(e) => {
+                      const text = e.target.value;
+                      const match = library.units.find((u) => latestVersion(u).name === text.trim());
+                      onChange({
+                        targetUnit: text,
+                        targetUnitRef: match
+                          ? { uid: match.uid, version: latestVersion(match).version, name: latestVersion(match).name }
+                          : undefined,
+                      });
+                    }}
+                  />
+                  <select
+                    className="unit-version-select"
+                    value={formula.targetUnitRef ? `${formula.targetUnitRef.uid}@${formula.targetUnitRef.version}` : ""}
+                    onChange={(e) => {
+                      const key = e.target.value;
+                      if (!key) { onChange({ targetUnitRef: undefined }); return; }
+                      const [uid, ver] = key.split("@");
+                      const v = findVersion(library, uid, Number(ver));
+                      if (v) onChange({ targetUnit: v.name, targetUnitRef: { uid, version: v.version, name: v.name } });
+                    }}
+                  >
+                    <option value="">课程单位…</option>
+                    {library.units.map((u) =>
+                      u.versions.map((v) => (
+                        <option key={`${u.uid}@${v.version}`} value={`${u.uid}@${v.version}`}>
+                          {v.name} v{v.version}{v.version === latestVersion(u).version ? "（最新）" : ""}
+                        </option>
+                      )),
+                    )}
+                  </select>
+                </span>
+                {targetStatus && (
+                  <span className={`bind-tag ${targetStatus.outdated ? "outdated" : "current"}`}>
+                    {targetStatus.text}
+                    {formula.targetUnitRef?.migratedFrom && <span title="显式迁移"> ⇄ 由 v{formula.targetUnitRef.migratedFrom.version} 迁移</span>}
+                  </span>
+                )}
               </label>
               <label className="field-label">
                 备注
@@ -161,7 +267,7 @@ function fmt(n: number | undefined): string {
   return String(Number(n.toFixed(10)));
 }
 
-// mathjs 单位文本（m / s^2）→ 简单 TeX（\mathrm{m}/\mathrm{s}^{2}）
+// mathjs 单位文本（m / s^2，可能含课程单位名）→ 简单 TeX
 function toTexUnit(unit: string): string {
   if (!unit) return "";
   const parts = unit.split(/\s*\/\s*/);

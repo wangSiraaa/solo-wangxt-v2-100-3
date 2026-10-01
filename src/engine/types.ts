@@ -1,10 +1,7 @@
 // 量纲检查引擎的公共类型定义
 
-/** 变量：数值文本 + 单位文本（单位留空表示纯数） */
-export interface VariableDef {
-  value: string;
-  unit: string;
-}
+export type { UnitRef, VariableDef } from "./courseUnits";
+import type { UnitRef, VariableDef } from "./courseUnits";
 
 /** 一条公式 */
 export interface Formula {
@@ -16,6 +13,8 @@ export interface Formula {
   variables: Record<string, VariableDef>;
   /** 期望换算到的结果单位；留空表示使用计算得到的单位 */
   targetUnit: string;
+  /** 结果目标单位的版本绑定（自定义单位时锁定定义版本） */
+  targetUnitRef?: UnitRef;
   createdAt: number;
 }
 
